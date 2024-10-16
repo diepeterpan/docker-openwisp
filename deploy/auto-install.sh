@@ -58,16 +58,38 @@ apt_dependenices_setup() {
 	check_status $? "Python dependencies installation failed."
 }
 
+dnf_dependenices_setup() {
+	start_step "Setting up dependencies..."
+	dnf -y install python3 python3-pip git python3-devel gawk libffi-devel openssl-devel gcc make &>>$LOG_FILE
+	check_status $? "Python dependencies installation failed."
+}
+
 setup_docker() {
 	start_step "Setting up docker..."
 	docker info &>/dev/null
 	if [ $? -eq 0 ]; then
 		report_ok
 	else
-		curl -fsSL 'https://get.docker.com' -o '/opt/openwisp/get-docker.sh' &>>$LOG_FILE
-		sh '/opt/openwisp/get-docker.sh' &>>$LOG_FILE
-		docker info &>/dev/null
-		check_status $? "Docker installation failed."
+		system_id=$(lsb_release --id --short)
+		system_release=$(lsb_release --release --short)
+		if [ "$system_id" == "Rocky" ] && [ "$system_release" == "9.4" ]; then
+			dnf check-update &>>$LOG_FILE
+			dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo  &>>$LOG_FILE
+			dnf -y install docker-ce docker-ce-cli containerd.io  &>>$LOG_FILE
+			systemctl enable docker &>>$LOG_FILE
+			systemctl start docker &>>$LOG_FILE
+			docker info &>/dev/null
+			check_status $? "Docker installation failed."
+		else
+			curl -fsSL 'https://get.docker.com' -o '/opt/openwisp/get-docker.sh' &>>$LOG_FILE
+			sh '/opt/openwisp/get-docker.sh' &>>$LOG_FILE
+			if [ "$system_id" == "Fedora" ] && [ "$system_release" == "40" ]; then
+				systemctl enable docker &>>$LOG_FILE
+				systemctl start docker &>>$LOG_FILE
+			fi
+			docker info &>/dev/null
+			check_status $? "Docker installation failed."
+		fi
 	fi
 }
 
@@ -231,6 +253,21 @@ install_debian() {
 	give_information_to_user
 }
 
+upgrade_centos() {
+	dnf_dependenices_setup
+	upgrade_docker_openwisp
+	dashboard_domain=$(get_env "DASHBOARD_DOMAIN" "$INSTALL_PATH/.env")
+	echo -e ${GRN}"\nYour upgrade was successfully done."
+	echo -e "Your dashboard should be available on https://${dashboard_domain} in 2 minutes.\n"${NON}
+}
+
+install_centos() {
+	dnf_dependenices_setup
+	setup_docker
+	setup_docker_openwisp
+	give_information_to_user
+}
+
 init_setup() {
 	if [[ "$1" == "upgrade" ]]; then
 		echo -e ${GRN}"Welcome to OpenWISP auto-upgradation script."
@@ -245,6 +282,8 @@ init_setup() {
 		echo -e "  - Supported systems"
 		echo -e "    - Debian: 10 & 11"
 		echo -e "    - Ubuntu 18.04, 18.10, 20.04 & 22.04"
+		echo -e "    - Fedora 40"
+		echo -e "    - Rocky Linux 9.4"
 		echo -e ${YLW}"\nYou can use -u\--upgrade if you are upgrading from an older version.\n"${NON}
 	fi
 
@@ -257,8 +296,20 @@ init_setup() {
 	echo "" >$LOG_FILE
 
 	start_step "Checking your system capabilities..."
-	apt update &>>$LOG_FILE
-	apt -qq --yes install lsb-release &>>$LOG_FILE
+	if [ "$(grep '^ID=' /etc/os-release)" == "ID=\"rocky\"" ]; then
+		dnf update -y &>>$LOG_FILE
+		dnf install -y yum-utils &>>$LOG_FILE
+		dnf config-manager --set-enabled devel &>>$LOG_FILE
+		dnf update -y &>>$LOG_FILE
+		dnf install -y redhat-lsb-core &>>$LOG_FILE
+	elif [ "$(grep '^ID=' /etc/os-release)" == "ID=fedora" ]; then
+		dnf update -y &>>$LOG_FILE
+		dnf install -y lsb-release &>>$LOG_FILE
+	else
+		apt update &>>$LOG_FILE
+		apt -qq --yes install lsb-release &>>$LOG_FILE
+	fi;
+
 	system_id=$(lsb_release --id --short)
 	system_release=$(lsb_release --release --short)
 	incompatible_message="$system_id $system_release is not support. Installation might fail, continue anyway? (Y/n): "
@@ -277,6 +328,20 @@ init_setup() {
 			install_debian
 			;;
 		esac
+	elif [[ "$system_id" == "Fedora" || "$system_id" == "Rocky" ]]; then
+		case "$system_release" in
+		9.4 | 40)
+			if [[ "$1" == "upgrade" ]]; then
+				report_ok && upgrade_centos
+			else
+				report_ok && install_centos
+			fi
+			;;
+		*)
+			error_msg_with_continue "$incompatible_message"
+			install_centos
+			;;
+		esac
 	else
 		error_msg_with_continue "$incompatible_message"
 		install_debian
@@ -292,7 +357,9 @@ init_help() {
 	echo -e "  - Root privileges"
 	echo -e "  - Supported systems"
 	echo -e "    - Debian: 10 & 11"
-	echo -e "    - Ubuntu 18.04, 18.10, 20.04, 22.04\n"
+	echo -e "    - Ubuntu 18.04, 18.10, 20.04, 22.04"
+	echo -e "    - Fedora 40"
+	echo -e "    - Rocky Linux 9.4\n"
 	echo -e "  -i\--install : (default) Install OpenWISP"
 	echo -e "  -u\--upgrade : Change OpenWISP version already setup with this script"
 	echo -e "  -h\--help    : See this help message"
